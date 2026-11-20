@@ -35,6 +35,10 @@ jobs:
           sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 186/' Makefile
           sed -i 's/^EXTRAVERSION = .*/EXTRAVERSION = +/' Makefile
           echo "vermagic target: $(grep '^VERSION' Makefile | awk '{print $3}').$(grep '^PATCHLEVEL' Makefile | awk '{print $3}').$(grep '^SUBLEVEL' Makefile | awk '{print $3}')$(grep '^EXTRAVERSION' Makefile | awk '{print $3}')"
+          # clean any stale build artifacts from clone (avoid "dirty kernel" issues)
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- mrproper 2>/dev/null || true
+          # re-apply vermagic patch (mrproper may have touched generated files only, Makefile stays)
+          echo "Makefile after mrproper: $(grep '^SUBLEVEL' Makefile) $(grep '^EXTRAVERSION' Makefile)"
 
       - name: Clone KernelSU-Next (legacy branch for non-GKI 4.14)
         run: |
@@ -45,10 +49,13 @@ jobs:
         run: |
           mkdir -p build
           cp device.config kernel_src/.config
+          # ★ 关键: 设备 config 里 CROSS_COMPILE="aarch64-linux-android-" 指向不存在的工具链
+          #   改成 Actions 安装的 aarch64-linux-gnu-, 否则 olddefconfig/prepare 找 android-gcc 失败
+          sed -i 's|^CONFIG_CROSS_COMPILE=.*|CONFIG_CROSS_COMPILE="aarch64-linux-gnu-"|' kernel_src/.config
           cd kernel_src
-          make ARCH=arm64 O=../build olddefconfig 2>&1 | tail -5
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../build olddefconfig 2>&1 | tail -5
           rm -f include/generated/utsrelease.h include/config/kernel.release
-          make ARCH=arm64 O=../build modules_prepare 2>&1 | tail -10
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../build modules_prepare 2>&1 | tail -10
           echo "kernel.release = $(cat ../build/include/config/kernel.release 2>/dev/null)"
 
       - name: Apply 4.14 compat shim
@@ -74,9 +81,13 @@ jobs:
       - name: Build kernelsu.ko
         run: |
           cd kernel_src
+          # ★ 决定性: KernelSU-Next 必须有 hook 模式否则 Kbuild:221 报错。
+          #   设备无 CONFIG_KPROBES -> 不能用 kprobe; 不改内核源码 -> 用 SYSCALL_TABLE_HOOK
+          #   (模块自带 patch_memory.o + symbol_resolver.o, 靠 kallsyms_lookup_name 找表, 4.14 仍导出)
           make -k -j$(nproc) ARCH=arm64 O=../build M=../KernelSU-Next/kernel \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CONFIG_KSU=m CONFIG_KSU_DISABLE_MANAGER=y CONFIG_KSU_DISABLE_POLICY=y \
+            CONFIG_KSU=m CONFIG_KSU_SYSCALL_TABLE_HOOK=y \
+            CONFIG_KSU_DISABLE_MANAGER=y CONFIG_KSU_DISABLE_POLICY=y \
             KSU_GIT_VERSION_VALID=1 KSU_GIT_VERSION=2 \
             modules 2>&1 | tee ../ksu_build.log
           KO=$(find ../KernelSU-Next/kernel -name 'kernelsu.ko' | head -1)

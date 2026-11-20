@@ -58,3 +58,21 @@ adb shell "cd /data/local/tmp && ./stage1 --aw-fops --slide 0x... --permissive \
 - kernel 源码 R 分支是 4.14.300，改 SUBLEVEL 到 186 只是 vermagic 对齐；4.14 各小版本 struct module 布局一致（账本实证），但 syscall ABI 等差异可能需调试。
 - 若编译失败，去 Actions 页面看日志；常见原因是 compat shim 缺 API，按报错补。
 - LKM 是内存态（tethered），重启失效，需重跑加载流程。
+
+## 编译失败排查记录 (2026-11-20 第一轮)
+
+第一轮报错及修复：
+1. `aarch64-linux-android-gcc: No such file` — 设备 config 里 `CONFIG_CROSS_COMPILE="aarch64-linux-android-"` 是厂商工具链，Actions 没有。已 sed 改成 `aarch64-linux-gnu-`，且所有 make 命令显式带 `CROSS_COMPILE=aarch64-linux-gnu-`。
+2. `kernel source is dirty` — clone 后改了 Makefile。已在 prepare 前加 `make mrproper`。
+3. **决定性**: `Kbuild:221 No hooks were defined` — KernelSU-Next 必须有 hook 模式。设备无 CONFIG_KPROBES，故选 `CONFIG_KSU_SYSCALL_TABLE_HOOK=y`（模块自带 patch_memory + symbol_resolver，靠 kallsyms_lookup_name 找表，4.14 仍导出该符号）。
+
+### ⚠️ 已知运行期风险
+Kconfig 明确写 `KSU_SYSCALL_TABLE_HOOK` 要求 kernel >= 4.17（pt_regs syscall ABI），
+而 RMX3031 是 **4.14（C 参数 syscall ABI）**。此模式**能编译出 .ko**，但加载后 syscall hook
+可能 ABI 不匹配而崩溃（账本 ZT9 记录过同类问题）。
+
+- **当前 workflow 用 SYSCALL_TABLE_HOOK 优先拿到可编译产物**用于验证加载链路。
+- 若加载后崩溃，正确解法是 `KSU_MANUAL_HOOK`：需向内核源码插 hook 点
+  （kernel/reboot.c 的 ksu_handle_sys_reboot 等，见账本 ZT13 的 4 处 C 签名钩子），工作量大。
+- 另一个思路：把 4.14 的 syscall ABI 适配加进 syscall_table_hook.c（把 pt_regs 参数
+  转成 C 参数调用），账本 ZT9 有现成分析。
