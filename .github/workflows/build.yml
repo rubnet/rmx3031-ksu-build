@@ -117,7 +117,19 @@ jobs:
           print('module_signature:', ms, 'sig_len=', ms[8])
           "
 
+      - name: Upload build log (always, even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            ksu_build.log
+            sign_build.log
+          retention-days: 30
+          if-no-files-found: ignore
+
       - name: Upload artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kernelsu-rmx3031
@@ -125,5 +137,4 @@ jobs:
             kernelsu_rmx3031.ko
             ghost_rmx3031.crt.der
             signing_cert.pem
-            ksu_build.log
           retention-days: 30
