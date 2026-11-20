@@ -34,52 +34,43 @@ jobs:
           echo "PATCHLEVEL before: $(grep '^PATCHLEVEL' Makefile | awk '{print $3}')"
           sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 186/' Makefile
           sed -i 's/^EXTRAVERSION = .*/EXTRAVERSION = +/' Makefile
-          echo "vermagic target: $(grep '^VERSION' Makefile | awk '{print $3}').$(grep '^PATCHLEVEL' Makefile | awk '{print $3}').$(grep '^SUBLEVEL' Makefile | awk '{print $3}')$(grep '^EXTRAVERSION' Makefile | awk '{print $3}')"
-          # clean any stale build artifacts from clone (avoid "dirty kernel" issues)
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- mrproper 2>/dev/null || true
-          # re-apply vermagic patch (mrproper may have touched generated files only, Makefile stays)
-          echo "Makefile after mrproper: $(grep '^SUBLEVEL' Makefile) $(grep '^EXTRAVERSION' Makefile)"
+          echo "vermagic target: $(grep '^VERSION' Makefile|awk '{print $3}').$(grep '^PATCHLEVEL' Makefile|awk '{print $3}').$(grep '^SUBLEVEL' Makefile|awk '{print $3}')$(grep '^EXTRAVERSION' Makefile|awk '{print $3}')"
 
       - name: Clone KernelSU-Next (legacy branch for non-GKI 4.14)
         run: |
           git clone --depth 1 --branch legacy https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
           echo "KSU-Next commit: $(cd KernelSU-Next && git rev-parse HEAD)"
 
-      - name: Patch missing arm64 asm headers
+      - name: Prepare kernel tree (mrproper -> config -> prepare -> modules_prepare)
         run: |
-          # 该 4.14.300 源码树的 arch/arm64/include/asm/types.h 缺失，
-          # 而 include/linux/types.h -> <asm/types.h> 需要它。
-          # 标准 arm64 内容就是转引 asm-generic/int-ll64.h（该文件存在）。
+          # ★★ 决定性修复: 全部在源码树内做(不用 O= 分离目录), 严格按标准顺序。
+          # 之前用 O=build 导致生成的 asm-generic 符号链接/version.h 落在 build/,
+          # 而模块编译的 include 路径找不到它们 => asm/errno.h / linux/version.h 全找不到。
           cd kernel_src
-          if [ ! -f arch/arm64/include/asm/types.h ]; then
-            cat > arch/arm64/include/asm/types.h <<'EOF'
-          #ifndef __ASM_TYPES_H
-          #define __ASM_TYPES_H
-          #include <asm-generic/int-ll64.h>
-          #endif
-          EOF
-            echo "created arch/arm64/include/asm/types.h"
-          fi
-          # 同理补几个常见的 arm64 缺失 generic asm 头（若 Kbuild generic-y 没生成）
-          for h in sizes.h page.h; do
-            if [ ! -f "arch/arm64/include/asm/$h" ] && [ -f "include/asm-generic/$h" ]; then
-              printf '#include <asm-generic/%s>\n' "$h" > "arch/arm64/include/asm/$h"
-              echo "created arch/arm64/include/asm/$h"
-            fi
-          done
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Prepare kernel config + modules_prepare
-        run: |
-          mkdir -p build
-          cp device.config kernel_src/.config
-          # ★ 关键: 设备 config 里 CROSS_COMPILE="aarch64-linux-android-" 指向不存在的工具链
-          #   改成 Actions 安装的 aarch64-linux-gnu-, 否则 olddefconfig/prepare 找 android-gcc 失败
-          sed -i 's|^CONFIG_CROSS_COMPILE=.*|CONFIG_CROSS_COMPILE="aarch64-linux-gnu-"|' kernel_src/.config
-          cd kernel_src
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../build olddefconfig 2>&1 | tail -5
-          rm -f include/generated/utsrelease.h include/config/kernel.release
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../build modules_prepare 2>&1 | tail -10
-          echo "kernel.release = $(cat ../build/include/config/kernel.release 2>/dev/null)"
+          echo "=== 1. mrproper ==="
+          make mrproper 2>&1 | tail -5
+
+          echo "=== 2. config ==="
+          cp ../device.config .config
+          # 设备 config 里 CROSS_COMPILE="aarch64-linux-android-"(厂商工具链,本机无)
+          sed -i 's|^CONFIG_CROSS_COMPILE=.*|CONFIG_CROSS_COMPILE="aarch64-linux-gnu-"|' .config
+          make olddefconfig 2>&1 | tail -5
+
+          echo "=== 3. prepare (生成 include/generated, asm-generic 符号链接, version.h) ==="
+          make prepare 2>&1 | tail -10
+
+          echo "=== 4. modules_prepare ==="
+          make modules_prepare 2>&1 | tail -10
+
+          echo "=== 验证关键生成头存在 ==="
+          for f in include/generated/utsrelease.h include/generated/version.h \
+                   arch/arm64/include/asm/types.h arch/arm64/include/uapi/asm/errno.h; do
+            [ -e "$f" ] && echo "OK $f" || echo "MISSING $f"
+          done
+          echo "kernel.release = $(cat include/config/kernel.release 2>/dev/null)"
 
       # NOTE: 不要加 extra compat shim / KCFLAGS -include!
       # KernelSU-Next legacy 自带完整 4.14 兼容层:
@@ -91,11 +82,11 @@ jobs:
       - name: Build kernelsu.ko
         run: |
           cd kernel_src
-          # ★ 决定性: KernelSU-Next 必须有 hook 模式否则 Kbuild:221 报错。
-          #   设备无 CONFIG_KPROBES -> 不能用 kprobe; 不改内核源码 -> 用 SYSCALL_TABLE_HOOK
-          #   (模块自带 patch_memory.o + symbol_resolver.o, 靠 kallsyms_lookup_name 找表, 4.14 仍导出)
-          make -k -j$(nproc) ARCH=arm64 O=../build M=../KernelSU-Next/kernel \
-            CROSS_COMPILE=aarch64-linux-gnu- \
+          # ★ 决定性1: KernelSU-Next 必须有 hook 模式否则 Kbuild:221 报错。
+          #   设备无 CONFIG_KPROBES -> 用 SYSCALL_TABLE_HOOK (模块自带 patch_memory+symbol_resolver)
+          # ★ 决定性2: 不用 O=, 与 prepare 阶段保持一致(都源码树内), include 路径才正确
+          make -k -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            M="$(pwd)/../KernelSU-Next/kernel" \
             CONFIG_KSU=m CONFIG_KSU_SYSCALL_TABLE_HOOK=y \
             CONFIG_KSU_DISABLE_MANAGER=y CONFIG_KSU_DISABLE_POLICY=y \
             KSU_GIT_VERSION_VALID=1 KSU_GIT_VERSION=2 \
