@@ -58,25 +58,12 @@ jobs:
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../build modules_prepare 2>&1 | tail -10
           echo "kernel.release = $(cat ../build/include/config/kernel.release 2>/dev/null)"
 
-      - name: Apply 4.14 compat shim
-        run: |
-          KSU=KernelSU-Next/kernel
-          mkdir -p "$KSU/shim"
-          cat > "$KSU/shim/compat_414_extra.h" <<'SHIM'
-          #ifndef __GHOSTLOCK_COMPAT_414_EXTRA_H__
-          #define __GHOSTLOCK_COMPAT_414_EXTRA_H__
-          #include <linux/version.h>
-          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
-          #ifndef copy_to_kernel_nofault
-          #define copy_to_kernel_nofault(dst, src, len) probe_kernel_write((dst), (src), (len))
-          #endif
-          #ifndef copy_from_kernel_nofault
-          #define copy_from_kernel_nofault(dst, src, len) probe_kernel_read((dst), (src), (len))
-          #endif
-          #endif
-          #endif
-          SHIM
-          echo "KCFLAGS=-include $(pwd)/$KSU/shim/compat_414_extra.h" >> $GITHUB_ENV
+      # NOTE: 不要加 extra compat shim / KCFLAGS -include!
+      # KernelSU-Next legacy 自带完整 4.14 兼容层:
+      #   - kernel/compat/kernel_compat.h 已 include linux/version.h 并处理老内核差异
+      #   - hook/patch_memory.c 自带 copy_to_kernel_nofault 的 4.14 回填
+      # 之前的 force-include 把 linux/version.h 注入到无内核 include 路径的编译单元
+      # 导致 "fatal error: linux/version.h: No such file or directory"。
 
       - name: Build kernelsu.ko
         run: |
