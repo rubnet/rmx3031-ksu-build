@@ -45,6 +45,29 @@ jobs:
           git clone --depth 1 --branch legacy https://github.com/KernelSU-Next/KernelSU-Next.git KernelSU-Next
           echo "KSU-Next commit: $(cd KernelSU-Next && git rev-parse HEAD)"
 
+      - name: Patch missing arm64 asm headers
+        run: |
+          # 该 4.14.300 源码树的 arch/arm64/include/asm/types.h 缺失，
+          # 而 include/linux/types.h -> <asm/types.h> 需要它。
+          # 标准 arm64 内容就是转引 asm-generic/int-ll64.h（该文件存在）。
+          cd kernel_src
+          if [ ! -f arch/arm64/include/asm/types.h ]; then
+            cat > arch/arm64/include/asm/types.h <<'EOF'
+          #ifndef __ASM_TYPES_H
+          #define __ASM_TYPES_H
+          #include <asm-generic/int-ll64.h>
+          #endif
+          EOF
+            echo "created arch/arm64/include/asm/types.h"
+          fi
+          # 同理补几个常见的 arm64 缺失 generic asm 头（若 Kbuild generic-y 没生成）
+          for h in sizes.h page.h; do
+            if [ ! -f "arch/arm64/include/asm/$h" ] && [ -f "include/asm-generic/$h" ]; then
+              printf '#include <asm-generic/%s>\n' "$h" > "arch/arm64/include/asm/$h"
+              echo "created arch/arm64/include/asm/$h"
+            fi
+          done
+
       - name: Prepare kernel config + modules_prepare
         run: |
           mkdir -p build
