@@ -57,15 +57,9 @@ jobs:
           cp ../device.config .config
           # 设备 config 里 CROSS_COMPILE="aarch64-linux-android-"(厂商工具链,本机无)
           sed -i 's|^CONFIG_CROSS_COMPILE=.*|CONFIG_CROSS_COMPILE="aarch64-linux-gnu-"|' .config
-          # ★ 启用 KPROBES (设备内核 HAVE_KPROBES=y 支持, 只是默认没开)。
-          #   KernelSU-Next 的 KPROBES_HOOK 实际用 register_trace_sys_enter(tracepoint),
-          #   不是真 kprobe; 只需 config 里打开让 Kconfig 依赖满足, 且能编 asm/syscall.h。
-          sed -i 's/^# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' .config
-          sed -i 's/^# CONFIG_KRETPROBES is not set/CONFIG_KRETPROBES=y/' .config
-          grep -q '^CONFIG_KPROBES=y' .config || echo 'CONFIG_KPROBES=y' >> .config
-          grep -q '^CONFIG_KRETPROBES=y' .config || echo 'CONFIG_KRETPROBES=y' >> .config
+          # ★ 不启用 KPROBES/KRETPROBES: 设备真机内核没编 kprobe, .gstatic
+          #   模块若依赖 register_kprobe 会加载失败。走纯 tracepoint 方案(见 patch 步骤)。
           make olddefconfig 2>&1 | tail -5
-          echo "KPROBES: $(grep '^CONFIG_KPROBES' .config) / KRETPROBES: $(grep '^CONFIG_KRETPROBES' .config)"
 
           echo "=== 3. prepare (生成 include/generated, asm-generic 符号链接, version.h) ==="
           make prepare 2>&1 | tail -10
@@ -78,7 +72,13 @@ jobs:
                    arch/arm64/include/asm/types.h arch/arm64/include/uapi/asm/errno.h; do
             [ -e "$f" ] && echo "OK $f" || echo "MISSING $f"
           done
-          echo "kernel.release = $(cat include/config/kernel.release 2>/dev/null)"
+          echo "utsrelease BEFORE = $(cat include/generated/utsrelease.h 2>/dev/null)"
+
+          # ★★ 强制 vermagic = 4.14.186+ (设备 uname=4.14.186+)
+          # EXTRAVERSION=+ 经 olddefconfig 后可能没进 utsrelease.h, 直接改写生成头最可靠。
+          echo '#define UTS_RELEASE "4.14.186+"' > include/generated/utsrelease.h
+          echo '4.14.186+' > include/config/kernel.release
+          echo "utsrelease AFTER  = $(cat include/generated/utsrelease.h)"
 
       # NOTE: 不要加 extra compat shim / KCFLAGS -include!
       # KernelSU-Next legacy 自带完整 4.14 兼容层:
@@ -100,7 +100,10 @@ jobs:
               echo "patched preempt in $f"
             fi
           done
-          grep -rn 'preempt_enable_no_resched_notrace' kernel/ || echo "no remaining preempt_no_resched_notrace"
+          cd "$GITHUB_WORKSPACE"
+          # ★ 纯 tracepoint hook: 去掉对 register_kprobe/kretprobe 符号的依赖
+          #   (设备内核 CONFIG_KPROBES=n, 这些符号根本不存在)
+          bash patch_tracepoint.sh
 
       - name: Generate SELinux private headers (flask.h / av_permissions.h)
         run: |
@@ -123,13 +126,13 @@ jobs:
       - name: Build kernelsu.ko
         run: |
           cd kernel_src
-          # ★ hook 模式: 用 KPROBES_HOOK (实为 tracepoint register_trace_sys_enter)。
-          #   SYSCALL_TABLE_HOOK 在源码里硬性 #error "requires kernel >= 4.17", 4.14 不可用。
-          #   MANUAL_HOOK 要改内核源码插 hook 点, 工作量大。KPROBES_HOOK 只需 config 开 KPROBES。
+          # ★ hook 模式: SYSCALL_TABLE_HOOK 分支已被 patch_tracepoint.sh 改造成
+          #   纯 tracepoint (register_trace_sys_enter), 不依赖任何 kprobe 符号。
+          #   设备内核 CONFIG_KPROBES=n, 绝不能用 KPROBES_HOOK (会引用不存在的 register_kprobe)。
           # ★ 不用 O=, 与 prepare 阶段一致(源码树内), include 路径才正确
           make -k -j$(nproc) ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             M="$(pwd)/../KernelSU-Next/kernel" \
-            CONFIG_KSU=m CONFIG_KSU_KPROBES_HOOK=y \
+            CONFIG_KSU=m CONFIG_KSU_SYSCALL_TABLE_HOOK=y \
             CONFIG_KSU_DISABLE_MANAGER=y CONFIG_KSU_DISABLE_POLICY=y \
             KSU_GIT_VERSION_VALID=1 KSU_GIT_VERSION=2 \
             modules 2>&1 | tee ../ksu_build.log
