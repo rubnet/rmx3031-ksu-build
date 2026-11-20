@@ -79,6 +79,24 @@ jobs:
       # 之前的 force-include 把 linux/version.h 注入到无内核 include 路径的编译单元
       # 导致 "fatal error: linux/version.h: No such file or directory"。
 
+      - name: Generate SELinux private headers (flask.h / av_permissions.h)
+        run: |
+          # flask.h / av_permissions.h 是内核编译 security/selinux 时由 genheaders
+          # 从 classmap.h 生成的私有头, out-of-tree 模块编译不会触发 -> 必须手动生成。
+          # KSU 的 Kbuild 已带 -I<srctree>/security/selinux/include, 文件到位即可。
+          cd kernel_src
+          export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          # 编译 host 工具 genheaders (宿主机 gcc)
+          make -C scripts/selinux/genheaders HOSTCC=gcc 2>&1 | tail -5
+          GH=$(find scripts/selinux/genheaders -name genheaders -type f | head -1)
+          [ -n "$GH" ] || { echo "!! genheaders tool not built"; exit 2; }
+          echo "genheaders = $GH"
+          # 生成到 security/selinux/include/ (KSU include 路径指向这里)
+          "$GH" security/selinux/include/flask.h security/selinux/include/av_permissions.h
+          echo "=== generated SELinux headers ==="
+          ls -la security/selinux/include/flask.h security/selinux/include/av_permissions.h
+          head -5 security/selinux/include/flask.h
+
       - name: Build kernelsu.ko
         run: |
           cd kernel_src
