@@ -76,3 +76,17 @@ Kconfig 明确写 `KSU_SYSCALL_TABLE_HOOK` 要求 kernel >= 4.17（pt_regs sysca
   （kernel/reboot.c 的 ksu_handle_sys_reboot 等，见账本 ZT13 的 4 处 C 签名钩子），工作量大。
 - 另一个思路：把 4.14 的 syscall ABI 适配加进 syscall_table_hook.c（把 pt_regs 参数
   转成 C 参数调用），账本 ZT9 有现成分析。
+
+## 编译失败排查记录 (第二轮)
+
+- `asm/errno.h` / `linux/version.h` Not found：根因是之前用 `O=build` 分离目录，生成的 asm-generic
+  符号链接/version.h 落在 build/，模块编译 include 路径找不到。改为源码树内标准顺序：
+  `mrproper → config → prepare → modules_prepare`（用户建议的顺序，已验证解决）。
+- `flask.h` Not found：SELinux 私有头由 genheaders 从 classmap.h 生成，out-of-tree 不触发。
+  加步骤编译 genheaders 并生成 flask.h/av_permissions.h 到 security/selinux/include/。
+- **`SYSCALL_TABLE_HOOK` 死路**：源码 syscall_table_hook.c:36 硬性 `#error requires kernel >= 4.17
+  (pt_regs syscall ABI)`，4.14 直接编译失败。改用 `CONFIG_KSU_KPROBES_HOOK=y`。
+  注意：KPROBES_HOOK 实际用 `register_trace_sys_enter` tracepoint，不是真 kprobe；只是 Kconfig
+  依赖需要 KPROBES，故在 config 里打开 CONFIG_KPROBES=y/KRETPROBES=y（设备内核 HAVE_KPROBES=y 支持）。
+- `preempt_enable_no_resched_notrace` 未声明：4.14 的 include/linux/preempt.h 在 `#ifdef MODULE`
+  下会 `#undef` 该宏（模块禁用）。加补丁把它替换成模块合法的 `preempt_enable_notrace()`。
