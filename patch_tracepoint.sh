@@ -54,6 +54,20 @@ s = s.replace(
 )
 open(p, "w", encoding="utf-8").write(s)
 print("[patch] hook_manager.c: top guard accepts KSU_SYSCALL_TP_HOOK")
+
+# hook_manager.h: the tracepoint-flag helpers (ksu_set/clear_task_tracepoint_flag)
+# are guarded by KSU_KPROBES_HOOK -> also accept KSU_SYSCALL_TP_HOOK, else
+# callers get implicit-function-declaration under -Werror.
+p = "kernel/hook/hook_manager.h"
+s = open(p, encoding="utf-8").read()
+if "#ifdef KSU_KPROBES_HOOK" not in s:
+    raise SystemExit("FATAL: hook_manager.h KSU_KPROBES_HOOK guard not found")
+s = s.replace(
+    "#ifdef KSU_KPROBES_HOOK",
+    "#if defined(KSU_KPROBES_HOOK) || defined(KSU_SYSCALL_TP_HOOK)",
+)
+open(p, "w", encoding="utf-8").write(s)
+print("[patch] hook_manager.h: flag helpers guard accepts KSU_SYSCALL_TP_HOOK")
 PY
 
 # --- 3. Verify guards ---
