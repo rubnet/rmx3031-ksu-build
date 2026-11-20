@@ -1,0 +1,6 @@
+# Keep these files LF (critical for shell scripts, YAML, and module config in Linux CI)
+.github/workflows/*.yml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+device.config text eol=lf
+*.md text eol=lf
